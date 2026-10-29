@@ -21,16 +21,32 @@ from src.telemetry.frr_collector import FRRTelemetryCollector
 from src.ai.feature_extractor import BGPFeatureExtractor
 from src.ai.classifier import BGPClassifier
 from src.ai.hybrid_engine import HybridDecisionEngine
+from src.ai.nvidia_nim import NvidiaNimBGPAdvisor
 
 logger = setup_logger("bgp_ai_agent")
 
 class BGPAIAgent:
-    def __init__(self, router: str = "as65003", poll_interval: float = 2.0, model_type: str = "random_forest"):
+    def __init__(
+        self,
+        router: str = "as65003",
+        poll_interval: float = 2.0,
+        model_type: str = "random_forest",
+        use_nim_advisor: bool = False
+    ):
         self.router = router
         self.interval = poll_interval
         self.collector = FRRTelemetryCollector(router_container=router, poll_interval=poll_interval)
         self.feature_extractor = BGPFeatureExtractor()
-        self.classifier = BGPClassifier(model_type=model_type)
+        self.model_type = model_type
+        self.use_nim_advisor = use_nim_advisor or (model_type == "nvidia_nim")
+        self.nim_advisor = NvidiaNimBGPAdvisor() if self.use_nim_advisor else None
+
+        if model_type == "nvidia_nim":
+            # Uses NIM advisor heuristic proxy as drop-in classifier
+            self.classifier = self.nim_advisor
+        else:
+            self.classifier = BGPClassifier(model_type=model_type)
+
         self.decision_engine = HybridDecisionEngine(classifier=self.classifier)
         self.running = False
 
@@ -86,6 +102,26 @@ class BGPAIAgent:
                 f"Trust: {trust:.2f} | Conf: {conf*100:.1f}% | Inference: {infer_duration_ms:.2f}ms | Reason: {reasons}"
             )
 
+            if self.use_nim_advisor and decision["classification_id"] > 0:
+                try:
+                    nim_eval = self.nim_advisor.analyze_route(
+                        prefix=prefix,
+                        as_path=r.get("as_path", []),
+                        origin_as=r.get("origin_as", 0),
+                        valley_free_violation=bool(features[8] > 0.5),
+                        announcements_per_minute=float(features[4]),
+                        flap_count_5min=int(features[5]),
+                        loc_pref_current=int(features[6]),
+                        ml_prediction=c_name,
+                        ml_probabilities=probs.tolist() if hasattr(probs, "tolist") else list(probs)
+                    )
+                    logger.info(
+                        f"[{self.router}][NVIDIA NIM Advisor] Policy: {nim_eval.get('recommended_policy')} "
+                        f"| RFC: {nim_eval.get('rfc_reference')} | Analysis: {nim_eval.get('explanation')}"
+                    )
+                except Exception as ex:
+                    logger.warning(f"[{self.router}][NVIDIA NIM] Analysis failed: {ex}")
+
             if decision["classification_id"] == 0:
                 logger.info(log_msg)
             elif decision["classification_id"] == 1:
@@ -96,7 +132,7 @@ class BGPAIAgent:
     async def run(self, duration: Optional[float] = None):
         """Runs the continuous asynchronous polling control loop."""
         await self.initialize()
-        logger.info(f"Starting Async AI Control Plane Agent on [{self.router}] (Interval: {self.interval}s)...")
+        logger.info(f"Starting Async AI Control Plane Agent on [{self.router}] (Interval: {self.interval}s, Model: {self.model_type})...")
         self.running = True
         start_time = time.time()
 
@@ -118,10 +154,25 @@ if __name__ == "__main__":
     parser.add_argument("--router", default="as65003", help="Target FRR router container")
     parser.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds")
     parser.add_argument("--duration", type=float, default=None, help="Optional duration limit in seconds")
-    parser.add_argument("--model", choices=["random_forest", "logistic_regression"], default="random_forest", help="Classifier model")
+    parser.add_argument(
+        "--model",
+        choices=["random_forest", "logistic_regression", "nvidia_nim"],
+        default="random_forest",
+        help="Classifier model"
+    )
+    parser.add_argument(
+        "--use-nim",
+        action="store_true",
+        help="Enable NVIDIA NIM foundation model advisor for deep route anomaly reasoning"
+    )
     args = parser.parse_args()
 
     configure_asyncio_policy()
 
-    agent = BGPAIAgent(router=args.router, poll_interval=args.interval, model_type=args.model)
+    agent = BGPAIAgent(
+        router=args.router,
+        poll_interval=args.interval,
+        model_type=args.model,
+        use_nim_advisor=args.use_nim
+    )
     asyncio.run(agent.run(duration=args.duration))

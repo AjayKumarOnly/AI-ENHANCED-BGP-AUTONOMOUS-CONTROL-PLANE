@@ -1,0 +1,300 @@
+==============================================================================
+PROJECT ANALYSIS NOTES — AI-Enhanced BGP Autonomous Control Plane
+Repository : https://github.com/Sudalai-kumar/AI-Enhanced-BGP
+Analysis   : 2026-10-23  (evidence basis for AI_Enhanced_BGP_Final_Review.pptx)
+==============================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. REPOSITORY STRUCTURE (confirmed via GitHub API recursive tree)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+config/         FRRouting config (frr.conf + daemons) for AS65001–AS65010
+data/raw/       bgp_telemetry.jsonl (2.1 MB live telemetry)
+experiments/    attacks/, baseline/, comparative/, results/ (CSV, JSON, PNG)
+scripts/        CLI entry points and evaluation harnesses
+src/            Core application: ai/, dataset/, policy/, telemetry/, utils/
+tests/          10 unit/integration test modules
+topologies/     docker-compose.yml + ContainerLab YAML for 10-AS testbed
+v3/             Archived v3 outputs: RIB logs, benchmark results, empirical dataset
+v4/             Additional iteration artifacts
+
+Key source files and confirmed sizes:
+  scripts/run_autonomous_controller.py   25.7 KB  — main production controller
+  src/ai/feature_extractor.py            11.3 KB  — 10-feature extraction
+  src/ai/hybrid_engine.py                 4.6 KB  — 6-indicator trust score
+  src/ai/classifier.py                    2.8 KB  — RF + LR inference wrapper
+  src/ai/agent.py                         5.3 KB  — async agent entry point
+  src/policy/policy_engine.py            13.1 KB  — FRR route-map generation + RIB verify
+  src/policy/shadow_validator.py          3.6 KB  — shadow staging engine
+  src/policy/rollback_manager.py          3.2 KB  — multi-criteria rollback
+  src/policy/state_store.py               8.2 KB  — SQLite persistence
+  src/policy/ablation_config.py           4.2 KB  — 5 ablation variants A0–A4
+  src/telemetry/frr_collector.py          9.6 KB  — Docker/vtysh RIB poller
+  src/telemetry/storage.py                9.3 KB  — SQLite ring buffer storage
+  src/dataset/train_models.py            21.2 KB  — ML training + evaluation pipeline
+  src/dataset/generator.py               10.7 KB  — synthetic dataset generator
+  experiments/attacks/attack_injector.py  8.6 KB  — attack scenario injector
+  experiments/comparative/heuristic_detector.py  2.6 KB
+  experiments/comparative/rpki_validator.py      2.7 KB
+  experiments/comparative/benchmark_evaluator.py 15.3 KB
+  src/models/random_forest.joblib        2.23 MB  — trained RF model (committed)
+  src/models/logistic_regression.joblib  5.1 KB   — trained LR model
+  src/models/scaler.joblib               823 bytes — StandardScaler
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. SYSTEM ARCHITECTURE (confirmed from run_autonomous_controller.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+AutonomousBGPController runs 5 concurrent asyncio coroutines:
+
+  1. _telemetry_loop   — polls FRR at 1s interval, builds snapshots
+                         → feeds asyncio.Queue (maxsize=8) snapshot_q
+  2. _inference_loop   — consumes snapshots, extracts 10-feature vectors,
+                         runs ML + hybrid trust → feeds decision_q
+  3. _policy_actor     — single consumer; batches decisions per snapshot,
+                         enforces anti-thrashing, performs atomic FRR commit
+  4. _heartbeat_loop   — peer reachability check every 10s (no extra Docker calls)
+  5. _metrics_loop     — CPU/RAM collection every 5s
+
+Additional confirmed properties:
+  - Startup state reconciliation: SQLite active_policies vs live FRR RIB
+  - If discrepancy found: re-applies stored policies or clears stale overrides
+  - Atomic all-or-nothing policy apply: full rollback on any per-prefix failure
+  - SQLite state_store: persists active policies across restarts
+  - ShadowValidator params: shadow_duration_sec=4.0, required_consecutive_ticks=2,
+                            min_dwell_sec=10.0
+  - RollbackManager params: required_normal_ticks=3
+  - Class labels: 0=Normal, 1=Suspicious, 2=Route Leak Candidate,
+                  3=Prefix Hijack Candidate
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. NETWORK TOPOLOGY (confirmed from config/, docker-compose.yml, policy_engine.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Deployment: Docker Compose, image quay.io/frrouting/frr:10.2.1 (10 containers)
+
+AS roles (confirmed from feature_extractor.py AS_RELATIONSHIPS + policy_engine.py):
+  AS65001  Tier-1 core — peers with AS65002; transit to AS65003, 65004
+  AS65002  Tier-1 core — peers with AS65001; transit to AS65005, 65006
+  AS65003  Regional customer of AS65001; DEFENDER vantage (primary controller)
+           Upstream of AS65007, AS65008
+  AS65004  Regional customer of AS65001; upstream of AS65009
+  AS65005  Regional customer of AS65002 (stub)
+  AS65006  Regional customer of AS65002; upstream of AS65010
+  AS65007  Legitimate stub — originates 192.0.2.0/24 (expected)
+  AS65008  Stub — originates 198.51.100.0/24
+  AS65009  Stub — originates 203.0.113.0/24
+  AS65010  ROGUE NODE — customer of AS65006; used for attack injection
+
+IP addressing (from docker-compose.yml and policy_engine.py PEER_IP_TO_AS):
+  net_12: 10.0.12.x  AS65001(10.0.12.2) ↔ AS65002(10.0.12.3)  [peer-to-peer]
+  net_13: 10.0.13.x  AS65001(10.0.13.2) ↔ AS65003(10.0.13.3)
+  net_14: 10.0.14.x  AS65001(10.0.14.2) ↔ AS65004(10.0.14.3)
+  net_25: 10.0.25.x  AS65002(10.0.25.2) ↔ AS65005(10.0.25.3)
+  net_26: 10.0.26.x  AS65002(10.0.26.2) ↔ AS65006(10.0.26.3)
+  net_37: 10.0.37.x  AS65003(10.0.37.2) ↔ AS65007(10.0.37.3)
+  net_38: 10.0.38.x  AS65003(10.0.38.2) ↔ AS65008(10.0.38.3)
+  net_49: 10.0.49.x  AS65004(10.0.49.2) ↔ AS65009(10.0.49.3)
+  net_60: 10.0.60.x  AS65006(10.0.60.2) ↔ AS65010(10.0.60.3)
+
+BGP timers (config/as65003/frr.conf): keepalive=3s, hold-time=9s
+Router-ID AS65003: 10.0.13.3
+
+Protected prefixes (PREFIX_BASELINES in feature_extractor.py):
+  192.0.2.0/24  → expected origin AS65007, path "65003 65007"
+  192.0.2.0/25  → expected origin AS65007, path "65003 65007" [sub-prefix]
+  198.51.100.0/24 → expected origin AS65008, path "65003 65008"
+  203.0.113.0/24  → expected origin AS65009, path "65004 65009"
+  208.65.153.0/24 → expected origin AS36561 [historical incident reference]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. FEATURE EXTRACTION (confirmed from src/ai/feature_extractor.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Index  Name                     Computation
+  0    as_path_len              len(as_path.split())
+  1    as_path_edit_distance    Levenshtein DP vs per-prefix baseline path
+  2    origin_as_change         1.0 if origin AS ≠ PREFIX_BASELINES, else 0.0
+  3    prefix_mask_len          /N parsed from prefix CIDR notation
+  4    announcements_per_minute (state transitions in last 60s / elapsed_sec) * 60
+  5    flap_count_5min          pairwise path/origin changes in last 300s sliding window
+  6    loc_pref_current         BGP LocalPref from RIB (default 100)
+  7    route_age_seconds        now − last_update_epoch (true measured, not synthetic)
+  8    valley_free_violation    1 if AS path violates Gao-Rexford (RFC 9234 DFA)
+  9    neighbor_diversity       active_announcing_peers / total_known_peers (clipped [0,1])
+
+Key implementation details:
+  - Levenshtein computed as numpy DP (O(mn) exact algorithm)
+  - valley_free check: DFA over AS_RELATIONSHIPS dict (states: UPWARD/PEER/DOWNWARD)
+    AS loops (duplicate ASN in path) always flagged as violation
+  - AS_RELATIONSHIPS encodes real-world AS pairs including Google/Rostelecom,
+    Cloudflare/Verizon/Allegheny, Pakistan Telecom/YouTube for historical incidents
+  - route_age_seconds uses last_update_epoch if available; falls back to first-seen
+    timestamp from sliding_window_events
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. HYBRID TRUST ENGINE (confirmed from src/ai/hybrid_engine.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6 weighted indicators (confirmed weights, sum = 1.0):
+  "origin"  0.20  — origin_as_change = 0 → score 1.0
+  "path"    0.20  — edit_distance=0 AND valley_free=0 → score 1.0
+  "flap"    0.15  — flap_count_5min = 0 → score 1.0
+  "prefix"  0.15  — mask_len ≤ 24 → score 1.0 (degrades for /25+)
+  "peer"    0.10  — neighbor_diversity ratio directly used as score
+  "ml"      0.20  — P(Normal) from classifier.predict_proba
+
+Trust output: weighted sum ∈ [0.0, 1.0]
+
+Trust-to-policy mapping (policy_engine.py map_trust_to_policy):
+  class_id=3 OR trust < 0.25   → LP 0  + community no-export  [Quarantine]
+  class_id=2 OR trust < 0.55   → LP 50                        [Hard Deprioritise]
+  class_id=1 OR trust < 0.80   → LP 80                        [Soft Deprioritise]
+  class_id=0 AND trust ≥ 0.85  → LP 100                       [Normal / Rollback]
+  Hysteresis: when existing policy is non-100, recovery requires trust ≥ 0.85 AND class 0
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. ML MODELS (confirmed from model_metadata.json + model_training_evaluation.json)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Training source : bgp_real_training.jsonl (empirical, live 10-AS FRR testbed)
+Training date   : 2026-09-06T14:28:49Z
+Git commit      : 03cfccf6b49efaf9b04d18451dde13ff8811e793
+Evaluation      : trial_based_holdout — Train: Trials 1–4; Test: Trial 5
+
+Dataset counts:
+  total_samples : 435
+  train_samples : 348
+  test_samples  : 87
+  fp_challenge  : 1,000 (false-positive challenge set)
+
+Random Forest (primary, default model):
+  weighted_f1          : 0.8141
+  macro_f1             : 0.4542  [class imbalance; rare classes underrepresented]
+  false_positive_rate  : 0.032   [3.2% on 1,000-sample FP challenge set]
+  Feature importances (top 5):
+    as_path_len              0.2012
+    as_path_edit_distance    0.1887
+    origin_as_change         0.1543
+    prefix_mask_len          0.1124
+    announcements_per_minute 0.0943
+
+Logistic Regression (secondary):
+  weighted_f1 : 0.8091
+  macro_f1    : 0.3773
+  NOTE: RF and LR show comparable weighted F1; neither dominates clearly.
+  LR macro F1 gap more pronounced than RF.
+
+Both models serialised with joblib and committed to repository (src/models/).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. ABLATION VARIANTS (confirmed from src/policy/ablation_config.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  A0  Standard BGP only            — no detector, no mitigation
+  A1  BGP + Heuristic detector     — static rules, immediate action, no trust
+  A2  BGP + ML classifier only     — RF class→policy, no shadow staging
+  A3  BGP + ML + Behavioural Trust — trust score added, still immediate action
+  A4  Full proposed system         — ML + trust + shadow + atomic commit + rollback
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. EXPERIMENTAL RESULTS (verified from CSV/JSON result files)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: experiments/results/attack_evaluation_results.csv
+
+S1 — Synthetic Direct Prefix Hijack (192.0.2.0/24):
+  Standard BGP (A0): NOT detected; propagates indefinitely; MSR 0%
+  RPKI ROV:          Detected; MTTD <0.10s; MTTM <0.10s; MSR 100%
+                     (requires valid RPKI ROA for the prefix)
+  Heuristics (A1):   NOT detected (false negative confirmed); MSR 0%
+  Proposed (A4):     Detected ✓; MTTD=4.12s; MTTM=5.44s; MSR=100%
+
+Source: experiments/results/baseline_summary.csv
+
+Normal testbed behaviour (no attack):
+  Cold Start Convergence     : 30.0 s (σ=0.0),   Status: Stable
+  Route Withdrawal Latency   : 30.0 s (σ=0.0),   Status: Stable (hold-timer)
+  Route Recovery Latency     : 0.530 s (σ=0.063, CV=11.84%)
+  BGP Updates per 3 Flap Cyc: 0.0 (no spurious updates)
+  Data Plane PDR             : 100.0%
+  Data Plane Avg RTT         : <1 ms (direct container link, below resolution)
+  AS65003 CPU                : 0.07%
+  AS65003 RAM                : 22.84 MiB
+
+Source: experiments/results/live_benchmark_results.json
+  mode: "MODELLED (dry-run)"
+  IMPORTANT: This file is explicitly labelled as a dry-run. The evidence_note
+  states: "values are previously documented estimates, not live measurements.
+  Run without --dry-run on a live FRR testbed to obtain EMPIRICAL measurements."
+  Therefore these values were NOT used as empirical evidence in the presentation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. ENVIRONMENT (confirmed from environment_manifest.json)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Generated      : 2026-09-06T14:50:17Z
+  Git commit     : 03cfccf6b49efaf9b04d18451dde13ff8811e793
+  Python         : 3.13.5 (Windows 11 64-bit, MSC v.1943)
+  Platform       : Windows-11-10.0.26200-SP0
+  Docker         : 29.7.2 (build a7dcaa6)
+  FRR image      : quay.io/frrouting/frr:10.2.1
+  FRR digest     : sha256:e47e67bd612030cb1bedee2bde85b73913f2ea021573b749deb21d94940f03c1
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. RESULT FIGURES IN REPOSITORY (genuine plots — can replace drawn diagrams)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+experiments/results/figures/ contains PNG outputs generated by plot scripts:
+
+  baseline_convergence_distribution.png   110 KB
+  baseline_latencies.png                   91 KB
+  baseline_memory.png                      98 KB
+  behavioral_trust_radar.png              477 KB  ← trust indicator radar chart
+  comparative_mttm_latency.png            141 KB  ← MTTM comparison across approaches
+  comparative_pdr_evaluation.png          151 KB  ← PDR comparison
+  feature_importance_breakdown.png        163 KB  ← RF feature importances
+  ml_challenge_fpr_breakdown.png          181 KB  ← false-positive rate breakdown
+  mttd_vs_mttm_comparison.png             150 KB  ← MTTD vs MTTM scatter
+  policy_tier_state_machine.png           183 KB  ← policy tier state machine
+
+These are genuine project output plots (not AI-generated). They can be embedded
+directly into presentation slides to replace drawn tables if desired.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. CONFIRMED LIMITATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+(a) PARTIAL RIB VISIBILITY
+    Controller only inspects routes installed as best-path by the vantage AS.
+    Non-selected paths and withdrawn routes are not examined. A route leak that
+    propagates via an upstream AS but is never installed at vantage will be missed.
+
+(b) SMALL TRAINING DATASET
+    435 empirical samples; macro F1=0.4542 for RF indicates poor recall on rare
+    anomaly classes (Suspicious, Route Leak) in the 87-sample holdout.
+    Not sufficient for production-grade generalisation.
+
+(c) DRY-RUN BENCHMARK
+    live_benchmark_results.json is explicitly a dry-run; presented MTTD values
+    for S2–S4 are estimates, not live measurements.
+
+(d) HEURISTIC DETECTOR FALSE NEGATIVES
+    A1 heuristic detector fails to detect S1 (prefix hijack) — confirmed by CSV.
+    Static thresholds miss hijacks without anomalous flap rate.
+
+(e) RF/LR PARITY
+    Both models achieve similar weighted F1 (~0.81). Neither is clearly dominant;
+    the presentation does not claim RF is superior to LR.
+
+(f) TESTBED SCOPE
+    10-AS containerised testbed on Windows 11 + Docker.
+    No evaluation on Linux-native BGP routers or real Internet peering sessions.
+
+(g) 4s SHADOW DWELL ADDS LATENCY
+    MTTD 4.12s vs RPKI <0.10s is an expected architectural tradeoff. The shadow
+    dwell prevents over-reaction to transient events but increases detection time.
+
+==============================================================================
+END OF ANALYSIS NOTES
+==============================================================================

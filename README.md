@@ -221,6 +221,36 @@ python -m unittest discover tests/
 
 ---
 
+## ⚡ NVIDIA NIM Foundation Model Integration
+
+The system natively supports **NVIDIA NIM (Inference Microservice)** foundation models (e.g. `meta/llama-3.2-11b-vision-instruct`, `nvidia/llama-3.1-nemotron-70b-instruct`) alongside classical ML classifiers (Random Forest & Logistic Regression). 
+
+### Capabilities:
+- **RFC-Grounded Anomaly Reasoning**: Explains root causes citing RFC 1997 (*Communities & `no-export`*), RFC 6811 (*RPKI ROV*), and RFC 9234 (*Route Leaks*).
+- **Autonomous Remediation Guidance**: Suggests dynamic BGP Local Preference policies (`QUARANTINE`, `HARD_DEPRIORITIZE`, `SOFT_DEPRIORITIZE`, `NO_ACTION`).
+- **Resilient Fallback**: Automatically cascades to heuristic rule verification if API network access is disrupted.
+
+### Configuration (`.env` or Environment Variables):
+```bash
+export NVIDIA_API_KEY="your-api-key"
+export NVIDIA_BASE_URL="https://integrate.api.nvidia.com/v1"
+export NVIDIA_MODEL="meta/llama-3.2-11b-vision-instruct"
+```
+
+### Running the NVIDIA NIM Evaluation Benchmark:
+```bash
+python scripts/demo_nvidia_nim.py
+```
+
+### Running the Autonomous Agent with NVIDIA NIM Advisor:
+```bash
+python src/ai/agent.py --router as65003 --model random_forest --use-nim
+# Or direct inference using NIM proxy:
+python src/ai/agent.py --router as65003 --model nvidia_nim
+```
+
+---
+
 ## 👥 Authors & Academic Context
 
 Developed as part of the **AI-Enhanced BGP Autonomous Control Plane Project (v3.0)**:

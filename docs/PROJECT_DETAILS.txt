@@ -1,0 +1,224 @@
+================================================================================
+AI-ENHANCED BGP AUTONOMOUS CONTROL PLANE — COMPLETE PROJECT DETAILS
+================================================================================
+
+This document provides a direct, comprehensive reference answering key questions
+regarding model code, datasets, outputs, trained model locations, and system architecture.
+
+--------------------------------------------------------------------------------
+1. WHERE IS THE CODE FOR RANDOM FOREST (RF) AND LOGISTIC REGRESSION (LR)?
+--------------------------------------------------------------------------------
+
+The project implements RF and LR across three distinct levels: training, real-time
+inference, and controller execution.
+
+A. MODEL TRAINING CODE:
+   - Primary File: AI-Enhanced-BGP/src/dataset/train_models.py
+     * train_and_save_models() [Lines 68-273]:
+       - Trains Random Forest (RandomForestClassifier, 50 estimators, max_depth=12,
+         calibrated via CalibratedClassifierCV with isotonic calibration).
+       - Trains Logistic Regression (LogisticRegression, max_iter=1000,
+         class_weight='balanced', calibrated via CalibratedClassifierCV with sigmoid).
+       - Generates synthetic datasets with overlapping distributions and evaluates
+         via cross-seed holdout (train seed=42, test seed=99).
+     * train_from_real_data() [Lines 275-505]:
+       - Trains and evaluates RF and LR on live empirical telemetry
+         (bgp_real_training.jsonl) using trial-based holdout (Trials 1-4 train, Trial 5 test).
+       - Fits StandardScaler and serializes models to .joblib files.
+   - CLI Training Script: AI-Enhanced-BGP/scripts/train_ai_models.py
+     * Entry-point script with command-line options:
+       --real-data : trains on empirical 10-AS testbed data
+       --samples   : sets number of synthetic samples (default 15,000)
+
+B. MODEL INFERENCE & RUNTIME CODE:
+   - Inference Wrapper: AI-Enhanced-BGP/src/ai/classifier.py
+     * Class BGPClassifier:
+       - Loads random_forest.joblib or logistic_regression.joblib and scaler.joblib.
+       - Enforces strict 10-feature schema validation against model_metadata.json.
+       - Method predict(feature_vector): scales features and outputs predicted
+         class ID (0=Normal, 1=Suspicious, 2=Route Leak, 3=Prefix Hijack)
+         and calibrated probability vector.
+   - Autonomous Agent: AI-Enhanced-BGP/src/ai/agent.py
+     * Class AutonomousBGPAgent: integrates BGPClassifier into an asynchronous pipeline.
+   - Main Controller: AI-Enhanced-BGP/scripts/run_autonomous_controller.py
+     * Coroutine _inference_loop: runs real-time inference on streaming BGP snapshots.
+   - Hybrid Trust Engine: AI-Enhanced-BGP/src/ai/hybrid_engine.py
+     * Combines ML probability P(Normal) with 5 behavioral heuristics (ML weight: 20%).
+
+
+--------------------------------------------------------------------------------
+2. WAS THE DATA CREATED ON OWN OR TAKEN FROM AN EXTERNAL SOURCE?
+--------------------------------------------------------------------------------
+
+The project uses CUSTOM-CREATED DATA (NOT downloaded directly from public repositories
+like CAIDA or RouteViews). It combines two internally created data streams:
+
+A. EMPIRICAL LIVE TESTBED DATASET (Self-Collected):
+   - File: AI-Enhanced-BGP/v3/empirical_training_dataset/bgp_real_training.jsonl (194 KB)
+   - Secondary Telemetry Log: AI-Enhanced-BGP/data/raw/bgp_telemetry.jsonl (2.12 MB, 7,484 lines)
+   - Generation Method:
+     * Built on a 10-Autonomous-System (AS65001 - AS65010) virtual carrier testbed
+       running FRRouting (FRR 10.2.1) in Docker containers (topologies/docker-compose.yml).
+     * Script scripts/collect_training_data.py injected automated attacks from rogue
+       AS65010 while simultaneously polling AS65001 (Core Defender) and AS65003
+       (Edge Defender) via vtysh.
+     * Contains 435 empirical samples with ground-truth labels across 5 multi-AS trials.
+
+B. PARAMETERIZED SYNTHETIC DATASET GENERATOR (Self-Programmed):
+   - File: AI-Enhanced-BGP/src/dataset/generator.py
+   - Function generate_bgp_dataset():
+     * Generates thousands of labeled records (default 60% Normal, 15% Suspicious,
+       10% Route Leak, 15% Prefix Hijack).
+     * Intentionally introduces overlapping feature distributions to reflect
+       real-world ambiguity and prevent artificial perfect-score separability.
+   - Function generate_false_positive_set():
+     * Generates a 1,000-sample challenge set of benign flapping/multi-homing
+       to test classifier false positive resistance.
+
+C. DOMAIN GROUNDING / HISTORICAL INCIDENT REFERENCE:
+   - Topology rules, Gao-Rexford valley-free DFA tables, and baseline paths in
+     src/ai/feature_extractor.py reference real-world incident signatures:
+     * Google / Rostelecom (2020 Route Leak)
+     * Cloudflare / Deep-Dive / Allegheny / Verizon (2019 Route Leak)
+     * Pakistan Telecom / YouTube (2008 Prefix Hijack)
+     * RFC 1997 (BGP Communities), RFC 6811 (RPKI ROV), RFC 9234 (BGP Route Leaks)
+
+
+--------------------------------------------------------------------------------
+3. WHERE IS THE OUTPUT? IN WHICH FOLDER?
+--------------------------------------------------------------------------------
+
+Output artifacts, evaluation metrics, logs, and figures are organized into these folders:
+
+A. EXPERIMENT RESULTS AND FIGURES:
+   - Folder: AI-Enhanced-BGP/experiments/results/
+     * attack_evaluation_results.csv & .json: Comparative evaluation across scenarios
+       S1 to S4 comparing Standard BGP, RPKI ROV, Heuristics, and AI Controller.
+     * baseline_summary.csv & .json: Cold start convergence (30.0s), route recovery
+       latency (0.53s), 100% PDR, container CPU (<0.1%) and memory (22.8 MiB).
+     * model_training_evaluation.json: F1 scores, confusion matrices, and false positive rates.
+     * live_benchmark_results.json: Benchmark execution data.
+     * WEEK_4_BASELINE_REPORT.md: Detailed baseline performance report.
+   - Folder: AI-Enhanced-BGP/experiments/results/figures/ (Genuine PNG Visualizations)
+     * behavioral_trust_radar.png : 6-indicator radar chart
+     * comparative_mttm_latency.png : MTTM comparison across methods
+     * comparative_pdr_evaluation.png : Packet Delivery Ratio analysis
+     * feature_importance_breakdown.png : Top features in Random Forest
+     * ml_challenge_fpr_breakdown.png : False-positive rate evaluation
+     * mttd_vs_mttm_comparison.png : Detection vs Mitigation scatter
+     * policy_tier_state_machine.png : 4-tier policy transition diagram
+     * baseline_latencies.png, baseline_memory.png, baseline_convergence_distribution.png
+
+B. VERSIONED ARCHIVES (V3 & V4):
+   - Folder: AI-Enhanced-BGP/v3/
+     * v3/RIB_verification_logs/ : Raw output logs from router routing tables (FIB/RIB).
+     * v3/attack_trials/ : Logs from individual attack executions.
+     * v3/benchmark_results/ : Benchmark output files.
+     * v3_final_results.md : Comprehensive technical milestone summary.
+   - Folder: AI-Enhanced-BGP/v4/
+     * v4/ablation_results/ : Results of ablation studies A0 through A4.
+     * v4/failure_analysis/ : Detailed inspection of edge cases and false negatives.
+     * v4/statistical_analysis/ : Confidence intervals and variance metrics.
+     * v4/v4_final_results.md : Final technical documentation for v4.
+
+C. ROOT PROJECT LEVEL ARTIFACTS:
+   - Directory: d:/MIT/Network/ndc_project/
+     * AI_Enhanced_BGP_Final_Review.pptx : Project presentation slides.
+     * AI_Enhanced_BGP-Final.pdf : Project research paper / report document.
+     * AI-Enhanced BGP Autonomous Control Plane · Simulation - Brave 2026-10-23 19-13-09.mp4 :
+       Screen recording of the running simulation dashboard.
+     * Front end Simulation.txt : Web simulation URL (https://bgpsimulation.space-z.ai/).
+     * Project_Analysis_Notes.txt : Detailed evidence audit and repository breakdown.
+
+
+--------------------------------------------------------------------------------
+4. WHERE IS THE TRAINED DATA / TRAINED MODEL?
+--------------------------------------------------------------------------------
+
+A. TRAINED MODEL FILES (Serialized Weights & Scalers):
+   - Directory: AI-Enhanced-BGP/src/models/
+     (Also mirrored in AI-Enhanced-BGP/v3/trained_models/)
+     * random_forest.joblib (2.23 MB)
+       - Trained Random Forest Classifier (50 trees, max depth 12).
+       - Calibrated with isotonic regression.
+       - Performance: Weighted F1 = 0.8141, Macro F1 = 0.4542, FPR = 3.2%.
+     * logistic_regression.joblib (5.06 KB)
+       - Trained Logistic Regression Classifier (max_iter=1000, balanced weights).
+       - Calibrated with sigmoid calibration.
+       - Performance: Weighted F1 = 0.8091, Macro F1 = 0.3773.
+     * scaler.joblib (823 bytes)
+       - Scikit-learn StandardScaler fitted on training features.
+     * model_metadata.json (2.06 KB)
+       - Model registry manifest storing version (bgp-v3.0-empirical-10as),
+         feature names, SHA-256 integrity hashes, sample sizes, and timestamps.
+
+B. TRAINING DATA FILES:
+   - Primary Empirical Dataset:
+     * AI-Enhanced-BGP/v3/empirical_training_dataset/bgp_real_training.jsonl (194 KB)
+     * 435 labeled records collected from live 10-AS FRR routers.
+   - Raw Telemetry Stream:
+     * AI-Enhanced-BGP/data/raw/bgp_telemetry.jsonl (2.12 MB, 7,484 entries)
+     * Continuous RIB snapshots, peer summaries, and system metrics from AS65003.
+
+
+--------------------------------------------------------------------------------
+5. OTHER IMPORTANT DETAILS OF THE PROJECT
+--------------------------------------------------------------------------------
+
+A. 10-AS MULTI-TIER TOPOLOGY (Containerized Testbed):
+   - Uses FRRouting (quay.io/frrouting/frr:10.2.1) across 10 Docker containers:
+     * Tier-1 Core Backbone : AS65001 & AS65002 (Peer-to-peer transit)
+     * Regional Transit     : AS65003, AS65004, AS65005, AS65006
+     * Customer Stubs       : AS65007 (Prefix 192.0.2.0/24), AS65008 (198.51.100.0/24),
+                              AS65009 (203.0.113.0/24)
+     * Rogue Attacker       : AS65010 (Injected malicious announcements/hijacks)
+   - Dual Vantage Defense:
+     * AS65001: Core Defender (protects transit backbone)
+     * AS65003: Edge Defender (protects customer stubs)
+
+B. 10 STANDARDIZED BEHAVIORAL FEATURES:
+   Extracted per prefix every 1-second telemetry tick:
+   1. as_path_len               : Hop count of the AS path
+   2. as_path_edit_distance     : Levenshtein distance vs historical baseline
+   3. origin_as_change          : 1.0 if origin ASN diverges from baseline, else 0.0
+   4. prefix_mask_len           : Subnet mask (/24, /25, etc.)
+   5. announcements_per_minute  : Normalized transition frequency
+   6. flap_count_5min           : Churn events in rolling 300-second window
+   7. loc_pref_current          : Current Local Preference in RIB (default 100)
+   8. route_age_seconds         : Real measured time elapsed since route installation
+   9. valley_free_violation     : Gao-Rexford commercial relationship DFA check
+   10. neighbor_diversity       : Ratio of announcing peers to total known peers
+
+C. 6-INDICATOR HYBRID TRUST SCORE:
+   Trust = 0.20*(Origin) + 0.20*(Path) + 0.15*(Flap) + 0.15*(Prefix) +
+           0.10*(Peer) + 0.20*(ML Prob Normal)
+   Output is bounded between 0.0 (untrusted) and 1.0 (fully trusted).
+
+D. 4-TIER AUTONOMOUS MITIGATION POLICY:
+   - Trust >= 0.85 & Class 0 : LocalPref 100 (Normal route / Rollback)
+   - Trust 0.55 - 0.80       : LocalPref 80  (Soft Deprioritization - Route Flapping)
+   - Trust 0.25 - 0.55       : LocalPref 50  (Hard Deprioritization - Route Leak)
+   - Trust < 0.25 or Class 3 : LocalPref 0 + RFC 1997 'no-export' (Quarantine Hijack)
+
+E. PRODUCTION SAFEGUARDS:
+   - Shadow Validation Buffer: Requires persistent anomaly for 4.0 seconds (2 consecutive
+     ticks) before applying mitigation, preventing reaction to transient noise.
+   - Anti-Thrashing Guard: 10-second minimum dwell time and asymmetric hysteresis
+     band (delta = 0.05) to eliminate policy oscillation near decision thresholds.
+   - Two-Layer Deep RIB Verification:
+     * Layer 1 (Config): Verifies FRR route-map syntax via 'show route-map'.
+     * Layer 2 (Data Plane RIB): Verifies that FRR actual best-path updated with
+       the desired LocalPref and community via 'show bgp ipv4 unicast <prefix> json'.
+   - Multi-Criteria Autonomous Rollback: Requires 3 consecutive clean ticks before
+     restoring LocalPref back to 100.
+
+F. ABLATION STUDY DESIGN (A0 - A4):
+   - A0: Standard BGP alone (Zero detection, hijack propagates indefinitely)
+   - A1: Static Heuristic Detector (Fast, but prone to false negatives on zero-churn hijacks)
+   - A2: Pure ML Classifier alone (Lacks staging; susceptible to transient flapping)
+   - A3: ML + Behavioral Trust Score (More stable, but immediate apply still risks thrashing)
+   - A4: Full Proposed System (ML + Trust + Shadow Buffer + Two-Layer Verification + Rollback)
+
+================================================================================
+END OF PROJECT DETAILS
+================================================================================

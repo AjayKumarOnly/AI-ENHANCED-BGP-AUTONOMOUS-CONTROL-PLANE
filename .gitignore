@@ -11,6 +11,11 @@ data/raw/
 .venv
 env/
 venv/
-.DS_Store
+*.DS_Store
 .idea/
 .vscode/
+*.mp4
+*.avi
+*.mov
+*.zip
+*.tar.gz
